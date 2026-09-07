@@ -1,0 +1,37 @@
+%%Evaluate this section once to get file names of all datasets in the current folder (check List to avoid mistakes manually!)
+filez=dir('*.set');
+for c = 1:size(filez,1)
+    disp(filez(c).name)
+end;
+
+%%
+%This section opens the remove components window and either also plots all
+%components (set PLOTALL = 1) or leaves this open.
+%After a pause, components marked for removal will be removed and the
+%dataset will be saved under the original plus '_comp_removed' as a suffix.
+%Additionally, a matrix that saves all removed components for later use is
+%generated.
+[ALLEEG EEG CURRENTSET ALLCOM] = eeglab;
+for c = 4 %8:size(filez,1)
+    EEG = pop_loadset( 'filename', filez(c).name);
+    [ALLEEG, EEG, CURRENTSET] = eeg_store( ALLEEG, EEG, 0 );
+    EEG = eeg_checkset( EEG );
+    [T, com] = pop_selectcomps(EEG, [1:43] ); %
+    pause
+    CR=find(EEG.reject.gcompreject==1);
+    EEG = pop_subcomp(EEG, CR, 0);
+    [ALLEEG EEG CURRENTSET] = pop_newset(ALLEEG, EEG, 1,'gui','off'); 
+    EEG = eeg_checkset(EEG);
+    EEG = pop_editset(EEG, 'setname', [EEG.setname(1:7) 'ICA Comp Removed']);
+    [ALLEEG EEG] = eeg_store(ALLEEG, EEG, CURRENTSET);
+    EEG = pop_saveset(EEG, 'filename', [filez(c).name]); %EEG.setname(1:7) 'ICA Comp Removed'
+    ALLEEG = pop_delset(ALLEEG, [1  2]);
+    close all
+    
+    %Store removed components in a matfile
+    %RemComp.(EEG.setname(1:5)) = CR;
+    %save('Removed Components.mat', 'RemComp')
+end;
+
+
+
