@@ -1,0 +1,796 @@
+---
+title: "Subject Data Analysis"
+output: html_notebook
+---
+
+# Load Required Libraries
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(readxl)
+library(brms)
+library(bayesplot)
+library(ggplot2)
+library(corrplot)
+library(ggpubr)
+```
+
+# Load Data
+```{r load-data}
+# Load R.Data file containing modelRT
+setwd("~/Documents/MediCoDe-TUS/Behav_TUS/")
+subject_data <- read_excel("subject_pressure_data_amcc_pcc_sham.xlsx")
+
+# View the structure of the data
+str(subject_data)
+head(subject_data)
+```
+
+
+```{r}
+ggpaired(subject_data, x =  "Side", y = "peak_pressure" ,color = "Side",
+     line.color = "grey", line.size = 0.3, id = "Subject", 
+     facet.by = "Region", short.panel.labs = FALSE)
+```
+
+```{r}
+# ============================================================
+# TUS Dose Calculation
+# Based on Nandi et al. (2025): Dose = I_SPPA x DC x SD
+# (absorbed dose in J/cm²)
+#
+# Protocol: 5 Hz theta burst TUS
+#   - PRF       : 5 Hz
+#   - PRI       : 200 ms
+#   - Duty Cycle: 10% (0.10)
+#   - Pulse dur : PRI x DC = 200 ms x 0.10 = 20 ms
+#   - Sessions  : SD = 2 s and SD = 120 s
+# ============================================================
+
+
+# ------------------------------------------------------------
+# STEP 1: Define protocol parameters
+# ------------------------------------------------------------
+
+PRF        <- 5          # Pulse repetition frequency (Hz)
+PRI_ms     <- 200        # Pulse repetition interval (ms)
+DC         <- 0.10       # Duty cycle (unitless, 10%)
+pulse_dur_ms <- PRI_ms * DC   # Pulse duration (ms) = 20 ms
+pulse_dur_s  <- pulse_dur_ms / 1000  # Convert to seconds
+
+#SD_values  <- c(120)  # Sonication durations to evaluate (seconds)
+
+# Acoustic medium properties (water, used as standard reference)
+rho <- 1000              # Density of water (kg/m³)
+c   <- 1500              # Speed of sound in water (m/s)
+Z   <- rho * c           # Acoustic impedance (Pa·s/m = kg/m²/s)
+                         # Z = 1,500,000 Pa·s/m
+
+cat("=== Protocol Parameters ===\n")
+cat(sprintf("PRF              : %g Hz\n", PRF))
+cat(sprintf("PRI              : %g ms\n", PRI_ms))
+cat(sprintf("Duty Cycle       : %g%%\n", DC * 100))
+cat(sprintf("Pulse Duration   : %g ms\n", pulse_dur_ms))
+cat(sprintf("Acoustic impedance (Z): %.2e Pa·s/m\n\n", Z))
+```
+
+
+```{r}
+# ------------------------------------------------------------
+# STEP 2: Function — pressure (kPa) to I_SPPA (W/cm²)
+# ------------------------------------------------------------
+# I_SPPA = P_peak² / (2 × Z)
+#
+# Where:
+#   P_peak  = peak positive pressure in Pa
+#   Z       = acoustic impedance in Pa·s/m (= kg/m²/s)
+#   Result  = intensity in W/m², then converted to W/cm²
+#             (divide by 10,000 since 1 m² = 10,000 cm²)
+# ------------------------------------------------------------
+
+pressure_to_ISPPA <- function(P_kPa) {
+  P_Pa    <- P_kPa * 1000              # Convert kPa → Pa
+  I_Wm2   <- (P_Pa^2) / (2 * Z)       # I_SPPA in W/m²
+  I_Wcm2  <- I_Wm2 / 10000            # Convert W/m² → W/cm²
+  return(I_Wcm2)
+}
+```
+
+
+```{r}
+# ------------------------------------------------------------
+# STEP 3: Function — compute dose (J/cm²) per Nandi et al.
+# ------------------------------------------------------------
+# Absorbed Dose = I_SPPA × DC × SD
+#
+# Where:
+#   I_SPPA = spatial-peak pulse-average intensity (W/cm²)
+#   DC     = duty cycle (unitless)
+#   SD     = total sonication duration (s)
+#
+# Note: I_SPPA × DC = I_SATA (spatial-average temporal-average
+#       intensity), so Dose = I_SATA × SD = J/cm²
+# ------------------------------------------------------------
+
+compute_dose <- function(I_SPPA_Wcm2, DC, SD_s) {
+  I_SATA <- I_SPPA_Wcm2 * DC          # Temporal-average intensity (W/cm²)
+  dose   <- I_SATA * SD_s             # Absorbed dose (J/cm²)
+  return(list(I_SATA = I_SATA, dose = dose))
+}
+```
+
+
+```{r}
+# ------------------------------------------------------------
+# STEP 4: Example — run across a range of pressures
+# ------------------------------------------------------------
+
+pressures_kPa_amcc_pcc <- subject_data$peak_pressure[subject_data$Region %in% c("aMCC", "PCC")]
+
+cat("=== Pressure → I_SPPA Conversion ===\n")
+cat(sprintf("%-15s %-20s\n", "Pressure (kPa)", "I_SPPA (W/cm²)"))
+cat(strrep("-", 36), "\n")
+
+for (P in pressures_kPa_amcc_pcc) {
+  I <- pressure_to_ISPPA(P)
+  cat(sprintf("%-15g %-20.4f\n", P, I))
+}
+```
+
+
+```{r}
+# ------------------------------------------------------------
+# STEP 5: Dose calculation for both sonication durations
+# ------------------------------------------------------------
+
+cat("\n=== Dose Calculation (Nandi et al. framework) ===\n")
+cat(sprintf("%-15s %-20s %-12s %-18s %-15s\n",
+            "Pressure (kPa)", "I_SPPA (W/cm²)", "SD (s)",
+            "I_SATA (W/cm²)", "Dose (J/cm²)"))
+cat(strrep("-", 82), "\n")
+
+results_verum <- data.frame()
+SD_values <- 120
+for (P in pressures_kPa_amcc_pcc) {
+  I_SPPA <- pressure_to_ISPPA(P)
+  for (SD in SD_values) {
+    out <- compute_dose(I_SPPA, DC, SD)
+    cat(sprintf("%-15g %-20.4f %-12g %-18.4f %-15.4f\n",
+                P, I_SPPA, SD, out$I_SATA, out$dose))
+    results_verum <- rbind(results_verum, data.frame(
+      Pressure_kPa  = P,
+      I_SPPA_Wcm2   = round(I_SPPA, 4),
+      SD_s          = SD,
+      I_SATA_Wcm2   = round(out$I_SATA, 4),
+      Dose_Jcm2     = round(out$dose, 4)
+    ))
+  }
+}
+```
+```{r}
+
+# ------------------------------------------------------------
+# STEP 4.2: SHAM run across a range of pressures
+# ------------------------------------------------------------
+
+pressures_kPa_sham <- subject_data$peak_pressure[subject_data$Region == "SHAM"]
+
+cat("=== Pressure → I_SPPA Conversion ===\n")
+cat(sprintf("%-15s %-20s\n", "Pressure (kPa)", "I_SPPA (W/cm²)"))
+cat(strrep("-", 36), "\n")
+
+for (P in pressures_kPa_sham) {
+  I <- pressure_to_ISPPA(P)
+  cat(sprintf("%-15g %-20.4f\n", P, I))
+}
+```
+```{r}
+# ------------------------------------------------------------
+# STEP 5.2: Dose calculation for both sonication durations - SHAM
+# ------------------------------------------------------------
+
+cat("\n=== Dose Calculation (Nandi et al. framework) ===\n")
+cat(sprintf("%-15s %-20s %-12s %-18s %-15s\n",
+            "Pressure (kPa)", "I_SPPA (W/cm²)", "SD (s)",
+            "I_SATA (W/cm²)", "Dose (J/cm²)"))
+cat(strrep("-", 82), "\n")
+
+results_sham <- data.frame()
+SD_values  <- 2  # Sonication durations to evaluate (seconds)
+for (P in pressures_kPa_sham) {
+  I_SPPA <- pressure_to_ISPPA(P)
+  for (SD in SD_values) {
+    out <- compute_dose(I_SPPA, DC, SD)
+    cat(sprintf("%-15g %-20.4f %-12g %-18.4f %-15.4f\n",
+                P, I_SPPA, SD, out$I_SATA, out$dose))
+    results_sham <- rbind(results_sham, data.frame(
+      Pressure_kPa  = P,
+      I_SPPA_Wcm2   = round(I_SPPA, 4),
+      SD_s          = SD,
+      I_SATA_Wcm2   = round(out$I_SATA, 4),
+      Dose_Jcm2     = round(out$dose, 4)
+    ))
+  }
+}
+```
+
+```{r}
+# ------------------------------------------------------------
+# STEP 6: Single-value quick-use wrapper
+# ------------------------------------------------------------
+# To use with your own pressure value, call:
+#
+#   P_kPa  <- 250          # <-- change to your value
+#   I      <- pressure_to_ISPPA(P_kPa)
+#   result <- compute_dose(I, DC, SD_s = 120)
+#
+#   cat(sprintf("I_SPPA : %.4f W/cm²\n", I))
+#   cat(sprintf("I_SATA : %.4f W/cm²\n", result$I_SATA))
+#   cat(sprintf("Dose   : %.4f J/cm²\n", result$dose))
+# ------------------------------------------------------------
+
+cat("\n=== Quick-use example: P = 250 kPa, SD = 120 s ===\n")
+P_example <- 250
+I_example <- pressure_to_ISPPA(P_example)
+res_120   <- compute_dose(I_example, DC, SD_s = 120)
+res_2     <- compute_dose(I_example, DC, SD_s = 2)
+
+cat(sprintf("Pressure         : %g kPa\n",      P_example))
+cat(sprintf("I_SPPA           : %.4f W/cm²\n",  I_example))
+cat(sprintf("I_SATA           : %.4f W/cm²\n",  res_120$I_SATA))
+cat(sprintf("Dose (SD = 2 s)  : %.4f J/cm²\n",  res_2$dose))
+cat(sprintf("Dose (SD = 120s) : %.4f J/cm²\n",  res_120$dose))
+cat(sprintf("Cumulative dose  : %.4f J/cm²\n",  res_2$dose + res_120$dose))
+```
+```{r}
+results_uni <- bind_rows(results_verum, results_sham)
+
+subject_data <- subject_data %>%
+  mutate(row_id = row_number())
+
+results_uni <- results_uni %>%
+  mutate(row_id = row_number())
+
+all_results <- left_join(subject_data, results_uni, by = "row_id") %>%
+  select(-row_id)
+
+save(all_results, file = "simulation_information_260309.RData") 
+```
+
+```{r}
+ggpaired(all_results, x =  "Side", y = "I_SPPA_Wcm2" ,color = "Side",
+     line.color = "grey", line.size = 0.3, id = "Subject", 
+     facet.by = "Region", short.panel.labs = FALSE)
+
+```
+
+```{r}
+ggpaired(all_results, x =  "Side", y = "Dose_Jcm2" ,color = "Side",
+     line.color = "grey", line.size = 0.3, id = "Subject", 
+     facet.by = "Region", short.panel.labs = FALSE)
+```
+
+# Load MODEL Data
+```{r load-data}
+# Load R.Data file containing modelRT
+setwd("~/Documents/MediCoDe-TUS/Bayesian_learning-main")
+load("ModelRT_prevAcc.RData")
+load("ModelAcc_prevError.RData")
+
+
+# Check modelRT structure
+summary(modelRT)
+```
+
+
+## Extract Subject-Level Random Effects RT
+```{r extract-random-effects}
+ranef_subject <- ranef(modelRT)$Subject
+
+# Helper function to extract random effects cleanly
+extract_ranef <- function(ranef_obj, effect_name, col_prefix) {
+  eff <- ranef_obj[, , effect_name]
+  data.frame(
+    Subject    = as.numeric(rownames(eff)),
+    Estimate   = eff[, "Estimate"],
+    Lower      = eff[, "Q2.5"],
+    Upper      = eff[, "Q97.5"]
+  ) %>% rename_with(~ paste0(col_prefix, .), -Subject)
+}
+
+# Extract the interaction effects of interest
+stim1  <- extract_ranef(ranef_subject, "Stimulation1",  "Stim1_")
+stim3  <- extract_ranef(ranef_subject, "Stimulation3",  "Stim3_")
+stim1_cong  <- extract_ranef(ranef_subject, "Stimulation1:Congruence",  "Stim1_Congruence_")
+stim3_cong  <- extract_ranef(ranef_subject, "Stimulation3:Congruence",  "Stim3_Congruence_")
+stim1_block <- extract_ranef(ranef_subject, "Stimulation1:BlockTrnr_z", "Stim1_BlockTrnr_")
+stim3_block <- extract_ranef(ranef_subject, "Stimulation3:BlockTrnr_z", "Stim3_BlockTrnr_")
+stim1_prev  <- extract_ranef(ranef_subject, "Stimulation1:PrevError",   "Stim1_PrevError_")
+stim3_prev  <- extract_ranef(ranef_subject, "Stimulation3:PrevError",   "Stim3_PrevError_")
+
+
+
+# Combine all random effects into one data frame
+model_subject_data <- stim1_cong %>%
+  left_join(stim3_cong,  by = "Subject") %>%
+  left_join(stim1_block, by = "Subject") %>%
+  left_join(stim3_block, by = "Subject") %>%
+  left_join(stim1_prev,  by = "Subject") %>%
+  left_join(stim3_prev,  by = "Subject")%>%
+  left_join(stim1,  by = "Subject")%>%
+  left_join(stim3,  by = "Subject")
+
+head(model_subject_data)
+```
+
+
+## Merge with Subject Data (keeping Region and Side separate)
+```{r merge-data}
+stim_info_dose <- all_results %>%
+  group_by(Subject, Region) %>%
+  summarise(Dose_mean = mean(Dose_Jcm2))
+#show results
+print(stim_info_dose)
+# Keep Region and Side — do NOT aggregate across them
+merged_data <- stim_info_dose %>%
+  left_join(model_subject_data, by = "Subject") %>%
+  filter(!is.na(Dose_mean))
+
+# Check the data
+head(merged_data)
+print(paste("Total rows:", nrow(merged_data)))
+```
+
+
+## Helper: correlation + scatter plot function
+```{r helper-function}
+correlate_and_plot <- function(data, x_var, y_var, x_label, y_label, point_color = "steelblue") {
+  cor_results <- data %>%
+    group_by(Region) %>%
+    summarise(
+      n = sum(!is.na(.data[[x_var]]) & !is.na(.data[[y_var]])),
+      r = cor(.data[[x_var]], .data[[y_var]], use = "complete.obs"),
+      p_value = cor.test(.data[[x_var]], .data[[y_var]])$p.value,
+      .groups = "drop"
+    )
+  print(cor_results)
+  label_data <- cor_results %>%
+    mutate(label = paste0("r = ", round(r, 3),
+                          ", p = ", format.pval(p_value, digits = 2)))
+  p <- ggplot(data, aes(x = .data[[x_var]], y = .data[[y_var]])) +
+    geom_point(size = 3, alpha = 0.8, color = point_color) +
+    geom_smooth(method = "lm", se = TRUE, color = point_color, fill = "lightblue") +
+    geom_text(aes(label = Subject), vjust = -0.8, size = 2.8) +
+    geom_text(data = label_data,
+              aes(label = label),
+              x = -Inf, y = Inf,
+              hjust = -0.05, vjust = 3,
+              inherit.aes = FALSE) +
+    facet_grid(vars(Region)) +
+    labs(
+      title = paste0(y_label, " × ", x_label),
+      x = x_label,
+      y = y_label
+    ) +
+    theme_classic() +
+    theme(
+      axis.title.x = element_text(size = 16),
+      axis.title.y = element_text(size = 16),
+      axis.text.x  = element_text(size = 14),
+      axis.text.y  = element_text(size = 14),
+      legend.text  = element_text(size = 13),
+      legend.title = element_text(size = 14),
+      plot.title   = element_text(size = 18))
+  print(p)
+  invisible(cor_results)
+}
+```
+
+## Correlations: Stimulation 1 and 3× Dose
+```{r cor-stim1-cong}
+cor_stim1_cong <- correlate_and_plot(
+  data    = filter(merged_data, Region == "aMCC"),
+  x_var   = "Dose_mean",
+  y_var   = "Stim1_Estimate",
+  x_label = "Dose (J/cm2)",
+  y_label = "Stim1 Random Effect"
+)
+
+cor_stim3_cong <- correlate_and_plot(
+  data    = filter(merged_data, Region == "PCC"),
+  x_var   = "Dose_mean",
+  y_var   = "Stim3_Estimate",
+  x_label = "Dose (J/cm2)",
+  y_label = "Stim3 Random Effect"
+)
+```
+
+## Correlations: Stimulation1:Congruence × Dose
+```{r cor-stim1-cong}
+cor_stim1_cong <- correlate_and_plot(
+  data    = filter(merged_data, Region == "aMCC"),
+  x_var   = "Dose_mean",
+  y_var   = "Stim1_Congruence_Estimate",
+  x_label = "Dose (J/cm2)",
+  y_label = "Stim1:Congruence Random Effect"
+)
+
+cor_stim3_cong <- correlate_and_plot(
+  data    = filter(merged_data, Region == "PCC"),
+  x_var   = "Dose_mean",
+  y_var   = "Stim3_Congruence_Estimate",
+  x_label = "Dose (J/cm2)",
+  y_label = "Stim3:Congruence Random Effect"
+)
+```
+## Correlations: Stimulation1:BlockTrnr × Dose
+```{r cor-stim1-cong}
+cor_stim1_cong <- correlate_and_plot(
+  data    = filter(merged_data, Region == "aMCC"),
+  x_var   = "Dose_mean",
+  y_var   = "Stim1_BlockTrnr_Estimate",
+  x_label = "Dose (J/cm2)",
+  y_label = "Stim1:BlockTrnr Random Effect"
+)
+
+cor_stim3_cong <- correlate_and_plot(
+  data    = filter(merged_data, Region == "PCC"),
+  x_var   = "Dose_mean",
+  y_var   = "Stim3_BlockTrnr_Estimate",
+  x_label = "Dose (J/cm2)",
+  y_label = "Stim3:BlockTrnr Random Effect"
+)
+```
+
+## Correlations: Stimulation1:PrevError × Dose
+```{r cor-stim1-cong}
+cor_stim1_cong <- correlate_and_plot(
+  data    = filter(merged_data, Region == "aMCC"),
+  x_var   = "Dose_mean",
+  y_var   = "Stim1_PrevError_Estimate",
+  x_label = "Dose (J/cm2)",
+  y_label = "Stim1:PrevError Random Effect"
+)
+
+cor_stim3_cong <- correlate_and_plot(
+  data    = filter(merged_data, Region == "PCC"),
+  x_var   = "Dose_mean",
+  y_var   = "Stim3_PrevError_Estimate",
+  x_label = "Dose (J/cm2)",
+  y_label = "Stim3:PrevError Random Effect"
+)
+```
+
+
+
+
+## peak_pressure
+
+
+## Merge with Subject Data (keeping Region and Side separate)
+```{r merge-data}
+stim_info_dose_isppa <- all_results %>%
+  group_by(Subject, Region) %>%
+  summarise(isppa_mean = mean(I_SPPA_Wcm2))
+#show results
+print(stim_info_dose_isppa)
+# Keep Region and Side — do NOT aggregate across them
+merged_data_isppa <- stim_info_dose_isppa %>%
+  left_join(model_subject_data, by = "Subject") %>%
+  filter(!is.na(isppa_mean))
+
+# Check the data
+head(merged_data_isppa)
+print(paste("Total rows:", nrow(merged_data_isppa)))
+```
+## Correlations: Stimulation1 & 3 × ISPPA
+```{r cor-stim1-cong}
+cor_stim1_cong <- correlate_and_plot(
+  data    = filter(merged_data_isppa, Region == "aMCC"),
+  x_var   = "isppa_mean",
+  y_var   = "Stim1_Estimate",
+  x_label = "Isppa (W/cm2)",
+  y_label = "Stim1 Random Effect"
+)
+
+cor_stim3_cong <- correlate_and_plot(
+  data    = filter(merged_data_isppa, Region == "PCC"),
+  x_var   = "isppa_mean",
+  y_var   = "Stim3_Estimate",
+  x_label = "Isppa (W/cm2)",
+  y_label = "Stim3 Random Effect"
+)
+ 
+```
+## Correlations: Stimulation1:Congruence × ISPPA
+```{r cor-stim1-cong}
+cor_stim1_cong <- correlate_and_plot(
+  data    = filter(merged_data_isppa, Region == "aMCC"),
+  x_var   = "isppa_mean",
+  y_var   = "Stim1_Congruence_Estimate",
+  x_label = "Isppa (W/cm2)",
+  y_label = "Stim1:Congruence Random Effect"
+)
+
+cor_stim3_cong <- correlate_and_plot(
+  data    = filter(merged_data_isppa, Region == "PCC"),
+  x_var   = "isppa_mean",
+  y_var   = "Stim3_Congruence_Estimate",
+  x_label = "Isppa (W/cm2)",
+  y_label = "Stim3:Congruence Random Effect"
+)
+```
+## Correlations: Stimulation1:BlockTrnr × ISPPA
+```{r cor-stim1-cong}
+cor_stim1_cong <- correlate_and_plot(
+  data    = filter(merged_data_isppa, Region == "aMCC"),
+  x_var   = "isppa_mean",
+  y_var   = "Stim1_BlockTrnr_Estimate",
+  x_label = "Isppa (W/cm2)",
+  y_label = "Stim1:BlockTrnr Random Effect"
+)
+
+cor_stim3_cong <- correlate_and_plot(
+  data    = filter(merged_data_isppa, Region == "PCC"),
+  x_var   = "isppa_mean",
+  y_var   = "Stim3_BlockTrnr_Estimate",
+  x_label = "Isppa (W/cm2)",
+  y_label = "Stim3:BlockTrnr Random Effect"
+)
+```
+
+## Correlations: Stimulation1:PrevError × ISPPA
+```{r cor-stim1-cong}
+cor_stim1_cong <- correlate_and_plot(
+  data    = filter(merged_data_isppa, Region == "aMCC"),
+  x_var   = "isppa_mean",
+  y_var   = "Stim1_PrevError_Estimate",
+  x_label = "Isppa (W/cm2)",
+  y_label = "Stim1:PrevError Random Effect"
+)
+
+cor_stim3_cong <- correlate_and_plot(
+  data    = filter(merged_data_isppa, Region == "PCC"),
+  x_var   = "isppa_mean",
+  y_var   = "Stim3_PrevError_Estimate",
+  x_label = "Isppa (W/cm2)",
+  y_label = "Stim3:PrevError Random Effect"
+)
+```
+
+
+## Correlation ACCURACY - ISPPA
+
+```{r load-data}
+summary(modelAcc)
+
+```
+
+## Extract Subject-Level Random Effects Acc
+```{r extract-random-effects}
+ranef_subject <- ranef(modelAcc)$Subject
+
+# Helper function to extract random effects cleanly
+extract_ranef <- function(ranef_obj, effect_name, col_prefix) {
+  eff <- ranef_obj[, , effect_name]
+  data.frame(
+    Subject    = as.numeric(rownames(eff)),
+    Estimate   = eff[, "Estimate"],
+    Lower      = eff[, "Q2.5"],
+    Upper      = eff[, "Q97.5"]
+  ) %>% rename_with(~ paste0(col_prefix, .), -Subject)
+}
+
+# Extract the interaction effects of interest
+stim1  <- extract_ranef(ranef_subject, "Stimulation1",  "Stim1_")
+stim3  <- extract_ranef(ranef_subject, "Stimulation3",  "Stim3_")
+stim1_cong  <- extract_ranef(ranef_subject, "Stimulation1:Congruence",  "Stim1_Congruence_")
+stim3_cong  <- extract_ranef(ranef_subject, "Stimulation3:Congruence",  "Stim3_Congruence_")
+stim1_block <- extract_ranef(ranef_subject, "Stimulation1:BlockTrnr_z", "Stim1_BlockTrnr_")
+stim3_block <- extract_ranef(ranef_subject, "Stimulation3:BlockTrnr_z", "Stim3_BlockTrnr_")
+stim1_prev  <- extract_ranef(ranef_subject, "Stimulation1:PrevError",   "Stim1_PrevError_")
+stim3_prev  <- extract_ranef(ranef_subject, "Stimulation3:PrevError",   "Stim3_PrevError_")
+
+# Combine all random effects into one data frame
+model_subject_data_acc <- stim1_cong %>%
+  left_join(stim3_cong,  by = "Subject") %>%
+  left_join(stim1_block, by = "Subject") %>%
+  left_join(stim3_block, by = "Subject") %>%
+  left_join(stim1_prev,  by = "Subject") %>%
+  left_join(stim3_prev,  by = "Subject") %>%
+  left_join(stim1,  by = "Subject") %>%
+  left_join(stim3,  by = "Subject")
+
+head(model_subject_data)
+```
+
+
+## Merge with Subject Data (keeping Region and Side separate)
+```{r merge-data}
+stim_info_dose <- all_results %>%
+  group_by(Subject, Region) %>%
+  summarise(Dose_mean = mean(Dose_Jcm2))
+#show results
+print(stim_info_dose)
+# Keep Region and Side — do NOT aggregate across them
+merged_data <- stim_info_dose %>%
+  left_join(model_subject_data_acc, by = "Subject") %>%
+  filter(!is.na(Dose_mean))
+
+# Check the data
+head(merged_data)
+print(paste("Total rows:", nrow(merged_data)))
+```
+## DOSE
+
+## Correlations: Stimulation1 and 3 × Dose
+```{r cor-stim1-cong}
+cor_stim1_cong <- correlate_and_plot(
+  data    = filter(merged_data, Region == "aMCC"),
+  x_var   = "Dose_mean",
+  y_var   = "Stim1_Estimate",
+  x_label = "Dose (J/cm2)",
+  y_label = "Stim1 Random Effect"
+)
+
+cor_stim3_cong <- correlate_and_plot(
+  data    = filter(merged_data, Region == "PCC"),
+  x_var   = "Dose_mean",
+  y_var   = "Stim3_Estimate",
+  x_label = "Dose (J/cm2)",
+  y_label = "Stim3 Random Effect"
+)
+```
+
+## Correlations: Stimulation1:Congruence × Dose
+```{r cor-stim1-cong}
+cor_stim1_cong <- correlate_and_plot(
+  data    = filter(merged_data, Region == "aMCC"),
+  x_var   = "Dose_mean",
+  y_var   = "Stim1_Congruence_Estimate",
+  x_label = "Dose (J/cm2)",
+  y_label = "Stim1:Congruence Random Effect"
+)
+
+cor_stim3_cong <- correlate_and_plot(
+  data    = filter(merged_data, Region == "PCC"),
+  x_var   = "Dose_mean",
+  y_var   = "Stim3_Congruence_Estimate",
+  x_label = "Dose (J/cm2)",
+  y_label = "Stim3:Congruence Random Effect"
+)
+```
+## Correlations: Stimulation1:BlockTrnr × Dose
+```{r cor-stim1-cong}
+cor_stim1_cong <- correlate_and_plot(
+  data    = filter(merged_data, Region == "aMCC"),
+  x_var   = "Dose_mean",
+  y_var   = "Stim1_BlockTrnr_Estimate",
+  x_label = "Dose (J/cm2)",
+  y_label = "Stim1:BlockTrnr Random Effect"
+)
+
+cor_stim3_cong <- correlate_and_plot(
+  data    = filter(merged_data, Region == "PCC"),
+  x_var   = "Dose_mean",
+  y_var   = "Stim3_BlockTrnr_Estimate",
+  x_label = "Dose (J/cm2)",
+  y_label = "Stim3:BlockTrnr Random Effect"
+)
+```
+
+## Correlations: Stimulation1:PrevError × Dose
+```{r cor-stim1-cong}
+cor_stim1_cong <- correlate_and_plot(
+  data    = filter(merged_data, Region == "aMCC"),
+  x_var   = "Dose_mean",
+  y_var   = "Stim1_PrevError_Estimate",
+  x_label = "Dose (J/cm2)",
+  y_label = "Stim1:PrevError Random Effect"
+)
+
+cor_stim3_cong <- correlate_and_plot(
+  data    = filter(merged_data, Region == "PCC"),
+  x_var   = "Dose_mean",
+  y_var   = "Stim3_PrevError_Estimate",
+  x_label = "Dose (J/cm2)",
+  y_label = "Stim3:PrevError Random Effect"
+)
+```
+
+
+
+
+## ISPPA
+
+
+## Merge with Subject Data (keeping Region and Side separate)
+```{r merge-data}
+stim_info_dose_isppa <- all_results %>%
+  group_by(Subject, Region) %>%
+  summarise(isppa_mean = mean(I_SPPA_Wcm2))
+#show results
+print(stim_info_dose_isppa)
+# Keep Region and Side — do NOT aggregate across them
+merged_data_isppa <- stim_info_dose_isppa %>%
+  left_join(model_subject_data_acc, by = "Subject") %>%
+  filter(!is.na(isppa_mean))
+
+# Check the data
+head(merged_data_isppa)
+print(paste("Total rows:", nrow(merged_data_isppa)))
+```
+## Correlations: Stimulation1 × ISPPA
+```{r cor-stim1-cong}
+cor_stim1_cong <- correlate_and_plot(
+  data    = filter(merged_data_isppa, Region == "aMCC"),
+  x_var   = "isppa_mean",
+  y_var   = "Stim1_Estimate",
+  x_label = "Isppa (W/cm2)",
+  y_label = "Stim1 Random Effect"
+)
+
+cor_stim3_cong <- correlate_and_plot(
+  data    = filter(merged_data_isppa, Region == "PCC"),
+  x_var   = "isppa_mean",
+  y_var   = "Stim3_Estimate",
+  x_label = "Isppa (W/cm2)",
+  y_label = "Stim3 Random Effect"
+)
+```
+
+## Correlations: Stimulation1:Congruence × ISPPA
+```{r cor-stim1-cong}
+cor_stim1_cong <- correlate_and_plot(
+  data    = filter(merged_data_isppa, Region == "aMCC"),
+  x_var   = "isppa_mean",
+  y_var   = "Stim1_Congruence_Estimate",
+  x_label = "Isppa (W/cm2)",
+  y_label = "Stim1:Congruence Random Effect"
+)
+
+cor_stim3_cong <- correlate_and_plot(
+  data    = filter(merged_data_isppa, Region == "PCC"),
+  x_var   = "isppa_mean",
+  y_var   = "Stim3_Congruence_Estimate",
+  x_label = "Isppa (W/cm2)",
+  y_label = "Stim3:Congruence Random Effect"
+)
+```
+## Correlations: Stimulation1:BlockTrnr × ISPPA
+```{r cor-stim1-cong}
+cor_stim1_cong <- correlate_and_plot(
+  data    = filter(merged_data_isppa, Region == "aMCC"),
+  x_var   = "isppa_mean",
+  y_var   = "Stim1_BlockTrnr_Estimate",
+  x_label = "Isppa (W/cm2)",
+  y_label = "Stim1:BlockTrnr Random Effect"
+)
+
+cor_stim3_cong <- correlate_and_plot(
+  data    = filter(merged_data_isppa, Region == "PCC"),
+  x_var   = "isppa_mean",
+  y_var   = "Stim3_BlockTrnr_Estimate",
+  x_label = "Isppa (W/cm2)",
+  y_label = "Stim3:BlockTrnr Random Effect"
+)
+```
+
+## Correlations: Stimulation1:PrevError × ISPPA
+```{r cor-stim1-cong}
+cor_stim1_cong <- correlate_and_plot(
+  data    = filter(merged_data_isppa, Region == "aMCC"),
+  x_var   = "isppa_mean",
+  y_var   = "Stim1_PrevError_Estimate",
+  x_label = "Isppa (W/cm2)",
+  y_label = "Stim1:PrevError Random Effect"
+)
+
+cor_stim3_cong <- correlate_and_plot(
+  data    = filter(merged_data_isppa, Region == "PCC"),
+  x_var   = "isppa_mean",
+  y_var   = "Stim3_PrevError_Estimate",
+  x_label = "Isppa (W/cm2)",
+  y_label = "Stim3:PrevError Random Effect"
+)
+```
+

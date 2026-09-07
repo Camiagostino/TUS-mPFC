@@ -1,0 +1,406 @@
+---
+title: "Analysis on Flanker Task Data - Comparing different TUS, SHAM and Active Control
+  Stimulations:April2024" 
+output:
+  pdf_document: default
+  html_notebook: default
+  word_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r}
+# Load required packages
+library(ggplot2)
+library(readxl)
+library(lme4)
+library(lmerTest)
+library(merTools)
+library(dplyr)
+library(ez)
+library(emmeans)
+library(hrbrthemes)
+library(viridis)
+library(geomtextpath)
+library(ggforce)
+library(ggdist)
+library(gghalves)
+library(sjstats)
+library(MuMIn)
+library(ggpubr)
+library(tidyr)
+library(broom.mixed)
+library(car)
+ setwd("~/Documents/MediCoDe-TUS/Behav_TUS")
+
+
+```
+## Load and build dataframe
+```{r}
+# data of 3 participants which took part in three sessions (TUS, SHAM and active control stimulation)
+data <- read_excel("Data2Regress250520_Behaviour.xlsx") #no eeg THIS DATA ALREADY EXCLUDE MISSING TRIALS = 113
+# Define categories as factor variable
+Stimulation <- factor(data$Stimulation, levels = c(1, 2, 3, 4), labels = c("aMCC", "SHAM", "PCC", "NoSTIM"))
+Congruence <- factor(data$Congruence, levels = c(-1,1), labels = c("incongruent", "congruent"))
+#Subject <- factor(data$Subject, levels = c(1:12) )#,labels = c("S4", "S5", "S6", "S7", "S8", "S9", "S11","S13","S15","S17", "S18"))
+Subject <- data$Subject
+RT <- data$RT #reaction time
+Answer <- data$Error # Participants' answer (0 = incorrect; 1 = correct)
+#Error <- data$Error # answer of previous trial (nevermind the name "error"), it can be used to observe behaviour after error
+Trnr <- data$Trnr # trial number (600 trials each session, nans were excluded)
+BlockTrnr <- data$BlockTrnr # block number (10 blocks each session)
+Feedback <- data$Feedback
+
+df <- data.frame(Subject,Stimulation, Trnr, BlockTrnr, Congruence, RT, Answer)
+df$Stimulation <- relevel(df$Stimulation,"SHAM")
+df$Congruence <- relevel(df$Congruence,"congruent")
+df$Correct <- ifelse(df$Answer == 1, "Correct", "Error")
+# Calculate mean and standard deviation of RT
+mean_RT <- mean(df$RT, na.rm = TRUE)
+
+sd_RT <- sd(df$RT, na.rm = TRUE)
+
+# Filter out trials with RT outside ±3 standard deviations
+df <- df %>%
+ filter(RT >= 0.08 & RT <= 0.9)
+  #filter(RT >= (mean_RT - 3 * sd_RT) & RT <= (mean_RT + 3 * sd_RT))
+
+# Add a log-transformed reaction time column
+df$log_RT <- log(df$RT)
+
+
+df$log_RT <- log(df$RT)
+#print(df)
+#summary(df)
+
+df<- df %>%
+  filter(Stimulation != "NoSTIM")
+df$BlockTrnr_z <- scale(df$BlockTrnr, center = TRUE, scale = TRUE)
+df$Trnr_z      <- scale(df$Trnr, center = TRUE, scale = TRUE)
+
+summary(df)
+```
+
+```{r} 
+# Ensure the data is sorted by Subject and Trial number (Trnr) to maintain the correct order
+df <- df %>%
+  arrange(Subject, BlockTrnr,Trnr)
+
+# Create a new variable for the accuracy of the previous trial
+df <- df %>%
+  group_by(Subject,BlockTrnr) %>%  # Group by subject to ensure it resets for each subject
+  mutate(Error_Tm1 = lag(Answer, n = 1)) %>%  # Use lag to get the previous trial's accuracy
+  mutate(Error_Tm1 = ifelse(Trnr == min(Trnr), NA, Error_Tm1))  # Set first trial of each block to NA
+
+
+# Check the first few rows to confirm the new variable
+head(df)
+
+```
+
+
+```{r}
+
+df_summary <- df %>%
+  group_by(BlockTrnr, Stimulation, Congruence) %>%
+  summarise(
+    mean_acc = mean(Answer, na.rm = TRUE),
+    sem_acc  = sd(Answer, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  ) %>%
+ mutate(BlockTrnr = factor(as.numeric(BlockTrnr), levels = 1:12))
+df_summary$Stimulation <- relevel(df_summary$Stimulation,"aMCC")
+ggplot(df_summary, aes(x = BlockTrnr, y = mean_acc,
+                       color = Stimulation, fill = Stimulation)) +
+  facet_wrap(~ Congruence) +
+  geom_line(aes(group = Stimulation), size = 1) +
+  geom_ribbon(aes(ymin = mean_acc - sem_acc,
+                  ymax = mean_acc + sem_acc,
+                  group = Stimulation),
+              alpha = 0.3, color = NA) +
+  labs(
+    x = "Block",
+    y = "Mean ACC (± SEM)",
+    title = "Acc Evolution Across Blocks (Mean ± SEM)"
+  ) +
+  theme_classic(base_size = 14)
+```
+
+## Task Stage Analysis (Early, Middle, Late)
+
+```{r}
+# Create task stage variable based on block number
+df_stages <- df %>%
+  mutate(
+    TaskStage = case_when(
+      BlockTrnr >= 1 & BlockTrnr <= 4 ~ "Early",
+      BlockTrnr >= 5 & BlockTrnr <= 8 ~ "Middle",
+      BlockTrnr >= 9 & BlockTrnr <= 12 ~ "Late",
+      TRUE ~ NA_character_
+    ),
+    TaskStage = factor(TaskStage, levels = c("Early", "Middle", "Late"))
+  )
+
+# Aggregate data by task stage and stimulation condition for ACCURACY
+accuracy_by_stage <- df_stages %>%
+  group_by(Subject, TaskStage, Stimulation, Congruence) %>%
+  summarise(
+    Accuracy = mean(Answer, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+accuracy_by_stage$Stimulation <- relevel(accuracy_by_stage$Stimulation, "aMCC")
+accuracy_by_stage$Congruence <- relevel(accuracy_by_stage$Congruence, "congruent")
+
+# Plot accuracy by task stage and stimulation condition
+p_acc_stage <- ggplot(accuracy_by_stage, aes(x = TaskStage, y = 1-Accuracy, fill = Stimulation)) +
+  geom_bar(
+    stat = "summary",
+    fun = mean,
+    position = position_dodge(width = 0.8),
+    alpha = 0.7,
+    color = "black",
+    width = 0.6
+  ) +
+  # geom_point(
+  #   aes(group = Stimulation),
+  #   position = position_dodge(width = 0.8),
+  #   shape = 21,
+  #   size = 2,
+  #   stroke = 0.3,
+  #   alpha = 0.5
+  # ) +
+  stat_summary(
+    fun.data = mean_se,
+    geom = "errorbar",
+    width = 0.2,
+    position = position_dodge(width = 0.8)
+  ) +
+  facet_wrap(~ Stimulation) +
+  scale_fill_manual(values = c(
+    "aMCC" = "#CC6677",
+    "SHAM" = "#E69F00",
+    "PCC" = "#56B4E9"
+  )) +
+  theme_classic(base_size = 12) +
+  labs(
+    title = "Accuracy Across Task Stages by Stimulation Condition",
+    x = "Task Stage",
+    y = "Accuracy (Proportion Correct)",
+    fill = "Stimulation"
+  ) +
+  theme(legend.position = "right")
+
+print(p_acc_stage)
+```
+
+```{r}
+# Aggregate data by task stage and stimulation condition for RT
+rt_by_stage <- df_stages %>%
+  group_by(Subject, TaskStage, Stimulation, Congruence) %>%
+  summarise(
+    MeanRT = mean(RT, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+rt_by_stage$Stimulation <- relevel(rt_by_stage$Stimulation, "aMCC")
+rt_by_stage$Congruence <- relevel(rt_by_stage$Congruence, "congruent")
+
+# Plot RT by task stage and stimulation condition
+p_rt_stage <- ggplot(rt_by_stage, aes(x = TaskStage, y = MeanRT, fill = Stimulation)) +
+  geom_bar(
+    stat = "summary",
+    fun = mean,
+    position = position_dodge(width = 0.8),
+    alpha = 0.7,
+    color = "black",
+    width = 0.6
+  ) +
+  geom_point(
+    aes(group = Stimulation),
+    position = position_dodge(width = 0.8),
+    shape = 21,
+    size = 2,
+    stroke = 0.3,
+    alpha = 0.5
+  ) +
+  stat_summary(
+    fun.data = mean_se,
+    geom = "errorbar",
+    width = 0.2,
+    position = position_dodge(width = 0.8)
+  ) +
+  facet_wrap(~ Congruence) +
+  scale_fill_manual(values = c(
+    "aMCC" = "#CC6677",
+    "SHAM" = "#E69F00",
+    "PCC" = "#56B4E9"
+  )) +
+  theme_classic(base_size = 12) +
+  labs(
+    title = "Reaction Time Across Task Stages by Stimulation Condition",
+    x = "Task Stage",
+    y = "Reaction Time (seconds)",
+    fill = "Stimulation"
+  ) +
+  theme(legend.position = "right")
+
+print(p_rt_stage)
+```
+
+```{r}
+# Bayesian multilevel model for accuracy by task stage, stimulation, and congruence
+library(brms)
+
+# Prepare data for brms - ensure proper factor coding
+accuracy_by_stage_model <- accuracy_by_stage %>%
+  mutate(
+    TaskStage   = factor(TaskStage,   levels = c("Early", "Middle", "Late")),
+    Stimulation = factor(Stimulation, levels = c("SHAM", "aMCC", "PCC")),  # SHAM as reference
+    Congruence  = factor(Congruence,  levels = c("congruent", "incongruent")),
+    Subject     = factor(Subject)
+  )
+
+# Smithson & Verkuilen transformation to avoid exact 0/1 for beta family
+n <- nrow(accuracy_by_stage_model)
+accuracy_by_stage_model <- accuracy_by_stage_model %>%
+  mutate(Accuracy = (Accuracy * (n - 1) + 0.5) / n)
+
+prior_model <- get_prior(
+  Accuracy ~ TaskStage * Stimulation + TaskStage * Congruence + TaskStage * Congruence * Stimulation +
+    (1 + TaskStage * Stimulation + TaskStage * Congruence + TaskStage * Congruence * Stimulation || Subject),
+  data = accuracy_by_stage_model
+)
+
+priors_model <- c(
+  prior(normal(3.14,  0.4),  class = "Intercept"),
+  prior(normal(0, 0.5), class = "b", coef = "Congruenceincongruent"),
+  prior(normal(0, 0.5), class = "b", coef = "StimulationaMCC"),
+  prior(normal(0, 0.5), class = "b", coef = "StimulationaMCC:Congruenceincongruent"),
+  prior(normal(0, 0.5), class = "b", coef = "StimulationPCC"),
+  prior(normal(0, 0.5), class = "b", coef = "StimulationPCC:Congruenceincongruent"),
+  prior(normal(0, 0.5), class = "b", coef = "TaskStageLate"),
+  prior(normal(0, 0.5), class = "b", coef = "TaskStageLate:Congruenceincongruent"),
+  prior(normal(0, 0.5), class = "b", coef = "TaskStageLate:StimulationaMCC"),
+  prior(normal(0, 0.5), class = "b", coef = "TaskStageLate:StimulationaMCC:Congruenceincongruent"),  # was missing
+  prior(normal(0, 0.5), class = "b", coef = "TaskStageLate:StimulationPCC"),
+  prior(normal(0, 0.5), class = "b", coef = "TaskStageLate:StimulationPCC:Congruenceincongruent"),
+  prior(normal(0, 0.5), class = "b", coef = "TaskStageMiddle"),
+  prior(normal(0, 0.5), class = "b", coef = "TaskStageMiddle:Congruenceincongruent"),
+  prior(normal(0, 0.5), class = "b", coef = "TaskStageMiddle:StimulationaMCC"),
+  prior(normal(0, 0.5), class = "b", coef = "TaskStageMiddle:StimulationaMCC:Congruenceincongruent"),
+  prior(normal(0, 0.5), class = "b", coef = "TaskStageMiddle:StimulationPCC"),
+  prior(normal(0, 0.5), class = "b", coef = "TaskStageMiddle:StimulationPCC:Congruenceincongruent")
+)
+
+# Fit brms model
+brms_accuracy_model <- brm(
+  Accuracy ~ TaskStage * Stimulation + TaskStage * Congruence + TaskStage * Congruence * Stimulation +
+    (1 + TaskStage * Stimulation + TaskStage * Congruence + TaskStage * Congruence * Stimulation || Subject),
+  data   = accuracy_by_stage_model,
+  family = Beta(),
+  prior  = priors_model,
+  chains = 4,
+  iter   = 2000,
+  warmup = 1000,
+  cores  = 4,
+  seed   = 123,
+  refresh = 0
+)
+
+# Summary of the model
+summary(brms_accuracy_model)
+
+# Conditional effects plot
+plot(conditional_effects(brms_accuracy_model), ask = FALSE)
+```
+
+```{r}
+# Combined visualization with paired lines showing individual subjects
+accuracy_by_stage$Stimulation <- relevel(accuracy_by_stage$Stimulation, "aMCC")
+p_acc_stage_paired <- ggpaired(
+  accuracy_by_stage,
+  x = "TaskStage",
+  y = "Accuracy",
+  id = "Subject",
+  fill = "Stimulation",
+  line.color = "grey",
+  line.size = 0.2,
+  facet.by = "Stimulation"
+) +
+  scale_color_manual(values = c(
+    "aMCC" = "#CC6677",
+    "SHAM" = "#E69F00",
+    "PCC" = "#56B4E9"
+  )) +
+  scale_fill_manual(values = c(
+    "aMCC" = "#CC6677",
+    "SHAM" = "#E69F00",
+    "PCC" = "#56B4E9"
+  )) +
+  stat_summary(
+    aes(group = Stimulation),
+    fun = mean,
+    geom = "point",
+    shape = 23,
+    size = 2,
+    color = "black",
+    fill = "white",
+    stroke = 0.8,
+    position = position_dodge(width = 0.8)
+  ) +
+  labs(
+    title = "Accuracy Across Task Stages (Paired by Subject)",
+    x = "Task Stage",
+    y = "Accuracy",
+    fill = "Stimulation"
+  )
+
+print(p_acc_stage_paired)
+```
+
+```{r}
+# Combined visualization with paired lines for RT
+p_rt_stage_paired <- ggpaired(
+  rt_by_stage,
+  x = "TaskStage",
+  y = "MeanRT",
+  id = "Subject",
+  fill = "Stimulation",
+  line.color = "grey",
+  line.size = 0.2,
+  facet.by = "Stimulation"
+) +
+  scale_color_manual(values = c(
+    "aMCC" = "#CC6677",
+    "SHAM" = "#E69F00",
+    "PCC" = "#56B4E9"
+  )) +
+  scale_fill_manual(values = c(
+    "aMCC" = "#CC6677",
+    "SHAM" = "#E69F00",
+    "PCC" = "#56B4E9"
+  )) +
+  stat_summary(
+    aes(group = Stimulation),
+    fun = mean,
+    geom = "point",
+    shape = 23,
+    size = 2,
+    color = "black",
+    fill = "white",
+    stroke = 0.8,
+    position = position_dodge(width = 0.8)
+  ) +
+  labs(
+    title = "Reaction Time Across Task Stages (Paired by Subject)",
+    x = "Task Stage",
+    y = "Reaction Time (seconds)",
+    fill = "Stimulation"
+  )
+
+print(p_rt_stage_paired)
+```
+
+
+
