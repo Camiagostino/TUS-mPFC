@@ -1,4 +1,4 @@
-rt_allsessions_bayes_alltrials <- function(
+acc_allsessions_bayes_alltrials <- function(
   data_path,
   output_path,
   iter,
@@ -23,7 +23,7 @@ rt_allsessions_bayes_alltrials <- function(
   # -------------------- Load data --------------------
   data_all <- readxl::read_xlsx(data_path)
   df_tus_eeg <- data_all%>%
-    dplyr::filter(Stimulation < 5)
+    dplyr::filter(Stimulation < 5) 
   # -------------------- Preprocessing --------------------
   
   #Prepare TUS eeg data
@@ -31,7 +31,7 @@ rt_allsessions_bayes_alltrials <- function(
   df_tus_eeg$Congruence <- ifelse(df_tus_eeg$Congruence == -1,-0.5, 0.5)
   df_tus_eeg$Feedback <- ifelse(df_tus_eeg$Feedback == 0,0.5, -0.5)
   df_tus_eeg$Subject <- as.factor(df_tus_eeg$Subject)
-  df_tus_eeg$Error <- ifelse(df_tus_eeg$Error == 0,-0.5,0.5)
+  #df_tus_eeg$Error <- ifelse(df_tus_eeg$Error == 0,-0.5,0.5)
   df_tus_eeg$BlockTrnr_z <- scale(df_tus_eeg$BlockTrnr, center = TRUE, scale = TRUE)
   df_tus_eeg$Trnr_z      <- scale(df_tus_eeg$Trnr, center = TRUE, scale = TRUE)
   
@@ -49,35 +49,32 @@ rt_allsessions_bayes_alltrials <- function(
       df_tus_eeg$Stimulation <- relevel(df_tus_eeg$Stimulation, "4")
       # -------------------- Priors --------------------
       priors_from_baseline <- c(
-        prior(normal(-1.119,  0.2),  class = "Intercept"),
-        prior(normal(-0.145, 0.2), class = "b", coef = "Congruence"),
-        prior(normal(0.2004,  0.2),  class = "b", coef = "Error"),
-        prior(normal(-0.0015,  0.2),  class = "b", coef = "PrevError"),
-        prior(normal(0, 0.2), class = "b", coef = "Stimulation1"),
-        prior(normal(0, 0.2), class = "b", coef = "Stimulation2"),
-        prior(normal(0, 0.2), class = "b", coef = "Stimulation3"),
-        prior(normal(0, 0.2), class = "b", coef = "Stimulation1:Congruence"),
-        prior(normal(0, 0.2), class = "b", coef = "Stimulation2:Congruence"),
-        prior(normal(0, 0.2), class = "b", coef = "Stimulation3:Congruence"),
-        prior(normal(0, 0.2), class = "b", coef = "Stimulation1:Error"),
-        prior(normal(0, 0.2), class = "b", coef = "Stimulation2:Error"),
-        prior(normal(0, 0.2), class = "b", coef = "Stimulation3:Error"),
-        prior(normal(0, 0.2), class = "b", coef = "Stimulation1:PrevError"),
-        prior(normal(0, 0.2), class = "b", coef = "Stimulation2:PrevError"),
-        prior(normal(0, 0.2), class = "b", coef = "Stimulation3:PrevError"),
-        prior(normal(0, 0.2), class = "b", coef = "Stimulation1:BlockTrnr_z"),
-        prior(normal(0, 0.2), class = "b", coef = "Stimulation2:BlockTrnr_z"),
-        prior(normal(0, 0.2), class = "b", coef = "Stimulation3:BlockTrnr_z")
+        prior(normal(3.14, 0.6), class = "Intercept"),
+        prior(normal(1.55, 0.6), class = "b", coef = "Congruence"),
+        prior(normal(0.0144, 0.6), class = "b", coef = "BlockTrnr_z"),
+        prior(normal(0, 0.6), class = "b", coef = "Stimulation1"),
+        prior(normal(0, 0.6), class = "b", coef = "Stimulation2"),
+        prior(normal(0, 0.6), class = "b", coef = "Stimulation3"),
+        prior(normal(0.037, 0.6), class = "b", coef = "PrevError"),
+        prior(normal(0, 0.6), class = "b", coef = "Stimulation1:Congruence"),
+        prior(normal(0, 0.6), class = "b", coef = "Stimulation2:Congruence"),
+        prior(normal(0, 0.6), class = "b", coef = "Stimulation3:Congruence"),
+        prior(normal(0, 0.6), class = "b", coef = "Stimulation1:PrevError"),
+        prior(normal(0, 0.6), class = "b", coef = "Stimulation2:PrevError"),
+        prior(normal(0, 0.6), class = "b", coef = "Stimulation3:PrevError"),
+        prior(normal(0, 0.6), class = "b", coef = "Stimulation1:BlockTrnr_z"),
+        prior(normal(0, 0.6), class = "b", coef = "Stimulation2:BlockTrnr_z"),
+        prior(normal(0, 0.6), class = "b", coef = "Stimulation3:BlockTrnr_z")
       )
       # -------------------- Model --------------------
       model <- brm(
-        RT ~ Stimulation*Congruence + Stimulation*Error+ Stimulation*PrevError + Stimulation*BlockTrnr_z +
-          (1 + Stimulation*Congruence +  Stimulation*Error + Stimulation*PrevError + Stimulation*BlockTrnr_z || Subject),
+        Error ~ Stimulation*Congruence + Stimulation*PrevError + Stimulation*BlockTrnr_z +
+          (1 + Stimulation*Congruence + Stimulation*PrevError + Stimulation*BlockTrnr_z || Subject),
         data   = df_tus_eeg,
-        family = lognormal(),
+        family = bernoulli(link = "logit"),
         prior  = priors_from_baseline,
-        iter = iter,
-        cores = cores,
+        iter   = iter,
+        cores  = cores,
         threads = threading(threads),
         control = list(adapt_delta = 0.99, max_treedepth = 12),
         save_pars = save_pars(all = TRUE)
